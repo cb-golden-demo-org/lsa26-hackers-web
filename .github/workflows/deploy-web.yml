@@ -12,6 +12,9 @@ on:
       environment:
         required: true
         type: string
+      fm_token:
+        required: true
+        type: string
 
 permissions:
   id-token: write
@@ -39,7 +42,7 @@ jobs:
           ARTIFACT_URL: ${{ inputs.artifact_url }}
           NAMESPACE: ${{ inputs.environment }}
           PUBLIC_HOST: core.cloudbees.guru
-          FM_KEY: ${{ secrets.FM_TOKEN }}
+          FM_KEY: ${{ inputs.fm_token }}
         run: |
           kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
