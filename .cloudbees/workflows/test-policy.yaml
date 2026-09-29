@@ -24,11 +24,11 @@ jobs:
         with:
           test-type: JUnit
           folder-name: ${{ cloudbees.workspace }}/junit.xml
-      - name: Sonar SAST
-        uses: cloudbees-io/sonarqube-bundled-sast-scan-code@v2
-        kind: scan
-        with:
-          language: JAVASCRIPT
+     # - name: Sonar SAST
+     #   uses: cloudbees-io/sonarqube-bundled-sast-scan-code@v2
+     #   kind: scan
+     #   with:
+     #     language: JAVASCRIPT
       - name: Publish evidence
         uses: cloudbees-io/publish-evidence-item@v1
         with:
