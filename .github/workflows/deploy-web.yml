@@ -39,10 +39,26 @@ jobs:
           ARTIFACT_URL: ${{ inputs.artifact_url }}
           NAMESPACE: ${{ inputs.environment }}
           PUBLIC_HOST: core.cloudbees.guru
+          FM_KEY: ${{ secrets.FM_TOKEN }}
         run: |
           kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
           kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: hacker-news-web-config
+            namespace: ${NAMESPACE}
+          data:
+            config.js: |
+              window.APP_CONFIG = {
+                FM_KEY: '${FM_KEY}',
+                API_URL: 'https://${PUBLIC_HOST}/${NAMESPACE}/api',
+                AUTH_URL: 'https://${PUBLIC_HOST}/${NAMESPACE}/auth',
+                USE_VPC: 'false',
+                FM_INSTANCE: 'cloudbees.io'
+              };
+          ---
           apiVersion: apps/v1
           kind: Deployment
           metadata:
@@ -60,23 +76,55 @@ jobs:
                 labels:
                   app: hacker-news-web
               spec:
+                volumes:
+                - name: web-config
+                  configMap:
+                    name: hacker-news-web-config
                 containers:
                 - name: hacker-news-web
                   image: ${ARTIFACT_URL}
                   imagePullPolicy: Always
+                  command:
+                  - /bin/sh
+                  - -c
+                  args:
+                  - |
+                    set -eu
+                    NS="\${PUBLIC_PATH#/}"
+
+                    sed -i \
+                      -e "s|src=/config.js|src=/\${NS}/config.js|g" \
+                      -e "s|href=/favicon.ico|href=/\${NS}/favicon.ico|g" \
+                      -e "s|href=/css/|href=/\${NS}/css/|g" \
+                      -e "s|href=/js/|href=/\${NS}/js/|g" \
+                      -e "s|src=/js/|src=/\${NS}/js/|g" \
+                      /usr/share/nginx/html/index.html
+
+                    for f in /usr/share/nginx/html/js/*.js; do
+                      sed -i \
+                        -e "s|/css/|/\${NS}/css/|g" \
+                        -e "s|/js/|/\${NS}/js/|g" \
+                        -e "s|\"/login\"|\"/\${NS}/login\"|g" \
+                        -e "s|push(\"/\")|push(\"/\${NS}/\")|g" \
+                        -e "s|replace(\"/\")|replace(\"/\${NS}/\")|g" \
+                        -e "s|to:\"/\"|to:\"/\${NS}/\"|g" \
+                        -e "s|href:\"/\"|href:\"/\${NS}/\"|g" \
+                        -e "s|path:\"/\"|path:\"/\${NS}/\"|g" \
+                        "\$f"
+
+                      sed -i -E "s|([A-Za-z0-9_]+)\.p=\"/\"|\1.p=\"/\${NS}/\"|g" "\$f"
+                    done
+
+                    exec nginx -g 'daemon off;'
                   ports:
-                  - containerPort: 8080
+                  - containerPort: 80
                   env:
-                  - name: ASPNETCORE_PATHBASE
+                  - name: PUBLIC_PATH
                     value: "/${NAMESPACE}"
-                  - name: API_URL
-                    value: "https://${PUBLIC_HOST}/${NAMESPACE}/api"
-                  - name: AUTH_URL
-                    value: "https://${PUBLIC_HOST}/${NAMESPACE}/auth"
-                  - name: USE_VPC
-                    value: "false"
-                  - name: FM_INSTANCE
-                    value: "cloudbees.io"
+                  volumeMounts:
+                  - name: web-config
+                    mountPath: /usr/share/nginx/html/config.js
+                    subPath: config.js
           ---
           apiVersion: v1
           kind: Service
@@ -89,7 +137,7 @@ jobs:
             ports:
             - name: http
               port: 80
-              targetPort: 8080
+              targetPort: 80
           ---
           apiVersion: networking.k8s.io/v1
           kind: Ingress
@@ -100,13 +148,39 @@ jobs:
               cert-manager.io/cluster-issuer: letsencrypt-prod
               kubernetes.io/ingress.class: nginx
               nginx.ingress.kubernetes.io/ssl-redirect: "true"
+              nginx.ingress.kubernetes.io/use-regex: "true"
+              nginx.ingress.kubernetes.io/rewrite-target: /\$2
           spec:
             rules:
             - host: ${PUBLIC_HOST}
               http:
                 paths:
-                - path: /${NAMESPACE}
-                  pathType: Prefix
+                - path: /${NAMESPACE}(/|$)(.*)
+                  pathType: ImplementationSpecific
+                  backend:
+                    service:
+                      name: hacker-news-web-svc
+                      port:
+                        number: 80
+          ---
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: hacker-news-web-assets
+            namespace: ${NAMESPACE}
+            annotations:
+              cert-manager.io/cluster-issuer: letsencrypt-prod
+              kubernetes.io/ingress.class: nginx
+              nginx.ingress.kubernetes.io/ssl-redirect: "true"
+              nginx.ingress.kubernetes.io/use-regex: "true"
+              nginx.ingress.kubernetes.io/rewrite-target: /\$1\$2\$3
+          spec:
+            rules:
+            - host: ${PUBLIC_HOST}
+              http:
+                paths:
+                - path: /${NAMESPACE}/(config.js|favicon.ico|css|js|img)(/|$)(.*)
+                  pathType: ImplementationSpecific
                   backend:
                     service:
                       name: hacker-news-web-svc
