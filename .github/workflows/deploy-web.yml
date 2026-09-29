@@ -1,0 +1,123 @@
+name: Deploy Hacker News Web to GKE
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_url:
+        required: true
+        type: string
+      environment:
+        required: false
+        type: string
+        default: hackers-news
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/776612895557/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions-traveldemo@cloudbees-sa-emea-demo.iam.gserviceaccount.com
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: cloudbees-core
+          location: europe-west1-d
+          project_id: cloudbees-sa-emea-demo
+
+      - name: Deploy Web to GKE
+        env:
+          ARTIFACT_URL: ${{ inputs.artifact_url }}
+          NAMESPACE: ${{ inputs.environment }}
+          APP_NAME: hacker-news-web
+          SERVICE_NAME: hacker-news-web-svc
+          CONTAINER_PORT: "8080"
+          PUBLIC_HOST: core.cloudbees.guru
+          PUBLIC_PATH: /hacker-news-web
+          API_URL: http://core.cloudbees.guru/hacker-news-api
+          AUTH_URL: http://core.cloudbees.guru/hacker-news-auth
+        run: |
+          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl apply -f - <<EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: ${APP_NAME}
+            namespace: ${NAMESPACE}
+            labels:
+              app: ${APP_NAME}
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: ${APP_NAME}
+            template:
+              metadata:
+                labels:
+                  app: ${APP_NAME}
+              spec:
+                containers:
+                - name: ${APP_NAME}
+                  image: ${ARTIFACT_URL}
+                  imagePullPolicy: Always
+                  ports:
+                  - containerPort: ${CONTAINER_PORT}
+                  env:
+                  - name: API_URL
+                    value: "${API_URL}"
+                  - name: AUTH_URL
+                    value: "${AUTH_URL}"
+                  - name: ASPNETCORE_PATHBASE
+                    value: "${PUBLIC_PATH}"
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: ${SERVICE_NAME}
+            namespace: ${NAMESPACE}
+          spec:
+            selector:
+              app: ${APP_NAME}
+            ports:
+            - name: http
+              port: 80
+              targetPort: ${CONTAINER_PORT}
+          ---
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: ${APP_NAME}
+            namespace: ${NAMESPACE}
+            annotations:
+              kubernetes.io/ingress.class: nginx
+              nginx.ingress.kubernetes.io/use-regex: "true"
+              nginx.ingress.kubernetes.io/rewrite-target: /\$2
+          spec:
+            rules:
+            - host: ${PUBLIC_HOST}
+              http:
+                paths:
+                - path: ${PUBLIC_PATH}(/|$)(.*)
+                  pathType: ImplementationSpecific
+                  backend:
+                    service:
+                      name: ${SERVICE_NAME}
+                      port:
+                        number: 80
+          EOF
+
+          kubectl rollout status deployment/${APP_NAME} -n ${NAMESPACE} --timeout=5m
+
+      - name: Verify pods
+        env:
+          NAMESPACE: ${{ inputs.environment }}
+        run: |
+          kubectl get pods -n ${NAMESPACE} -l app=hacker-news-web
