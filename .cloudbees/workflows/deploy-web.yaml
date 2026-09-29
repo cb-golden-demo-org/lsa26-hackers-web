@@ -1,0 +1,86 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: Deploy Hackers Web
+
+on:
+  workflow_call:
+    inputs:
+      artifact-url:
+        type: string
+        required: true
+      artifact-id:
+        type: string
+        required: true
+      environment:
+        type: string
+        required: true
+
+jobs:
+  deploy:
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Trigger and wait for GitHub Actions deploy
+        uses: docker://alpine:3.20
+        env:
+          GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
+          ARTIFACT_URL: ${{ inputs.artifact-url }}
+          ARTIFACT_ID: ${{ inputs.artifact-id }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          REPO: cb-golden-demo-org/lsa26-hackers-web
+          WORKFLOW: deploy-web.yml
+        run: |
+          apk add --no-cache curl jq
+
+          BODY=$(jq -n --arg url "$ARTIFACT_URL" --arg id "$ARTIFACT_ID" --arg env "$ENVIRONMENT" \
+            '{ref:"main", inputs:{artifact_url:$url, artifact_id:$id, environment:$env}}')
+
+          CODE=$(curl -s -o /tmp/resp -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $GH_DEPLOY_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/dispatches" \
+            -d "$BODY")
+          if [ "$CODE" != "204" ]; then
+            echo "Dispatch failed (HTTP $CODE):"; cat /tmp/resp; exit 1
+          fi
+
+          echo "Waiting for run to register..."
+          sleep 20
+
+          RUN_ID=$(curl -s \
+            -H "Authorization: Bearer $GH_DEPLOY_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/runs?event=workflow_dispatch&per_page=1" \
+            | jq -r '.workflow_runs[0].id')
+          echo "Tracking run ID: $RUN_ID"
+          echo "https://github.com/$REPO/actions/runs/$RUN_ID"
+
+          for i in $(seq 1 60); do
+            RUN=$(curl -s \
+              -H "Authorization: Bearer $GH_DEPLOY_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID")
+            STATUS=$(echo "$RUN" | jq -r '.status')
+            CONCLUSION=$(echo "$RUN" | jq -r '.conclusion')
+            echo "[$i/60] status=$STATUS conclusion=$CONCLUSION"
+            if [ "$STATUS" = "completed" ]; then
+              [ "$CONCLUSION" = "success" ] && exit 0 || { echo "Deploy failed: $CONCLUSION"; exit 1; }
+            fi
+            sleep 15
+          done
+          echo "Timeout after 15 minutes"
+          exit 1
+
+      - name: Register deployed artifact
+        uses: cloudbees-io/register-deployed-artifact@v2
+        with:
+          artifact-id: ${{ inputs.artifact-id }}
+
+      - name: Publish deployment evidence
+        uses: https://github.com/cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |-
+            ## Deployed: hacker-news-web
+            - **Image**: `${{ inputs.artifact-url }}`
+            - **Environment**: ${{ inputs.environment }}
+            - **URL**: https://core.cloudbees.guru/${{ inputs.environment }}
+          format: MARKDOWN
